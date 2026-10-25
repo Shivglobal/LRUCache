@@ -1,8 +1,23 @@
-include <iostream>
+#include <iostream>
+#include <thread>
+#include <vector>
+#include <queue>
+#include <mutex>
+#include <condition_variable>
+#include <atomic>
+#include <unordered_map>
+#include <functional>
+#include <chrono>
+#include <string>
+#include <mutex>
+#include <condition_variable>
+#include <iostream>
 #include <queue>
 #include <mutex>
 #include <condition_variable>
 #include <thread>
+#include <vector>
+#include <chrono>
 
 template<typename T>
 class BoundedQueue
@@ -50,7 +65,7 @@ public:
         });
 
         if (buffer.empty())
-            return false;          // queue shutdown
+            return false;          // queue shutdown & fully drained
 
         value = std::move(buffer.front());
         buffer.pop();
@@ -61,8 +76,10 @@ public:
 
     void shutdown()
     {
-        std::lock_guard<std::mutex> lock(mtx);
-        shutdownFlag = true;
+        {
+            std::lock_guard<std::mutex> lock(mtx);
+            shutdownFlag = true;
+        } // Mutex is released here, preventing lock contention upon wakeup
 
         not_full.notify_all();
         not_empty.notify_all();
@@ -71,33 +88,61 @@ public:
 
 int main()
 {
+    // Create a bounded queue with a tight capacity of 3 to force blocking behavior
     BoundedQueue<int> q(3);
 
-    std::thread producer([&]()
+    const int num_producers = 3;
+    const int num_consumers = 2;
+    const int items_per_producer = 5;
+
+    std::vector<std::thread> producers;
+    std::vector<std::thread> consumers;
+
+    // Launch multiple producers
+    for (int p = 0; p < num_producers; ++p)
     {
-        for(int i = 1; i <= 10; i++)
-        {
-            if(!q.push(i))
-                break;
+        producers.emplace_back([&q, p, items_per_producer]() {
+            for (int i = 1; i <= items_per_producer; ++i)
+            {
+                int val = p * 100 + i;
+                if (!q.push(val))
+                    break;
 
-            std::cout << "Produced : " << i << '\n';
-        }
+                std::cout << "[Producer " << p << "] Pushed: " << val << '\n';
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+        });
+    }
 
-        q.shutdown();
-    });
-
-    std::thread consumer([&]()
+    // Launch multiple consumers
+    for (int c = 0; c < num_consumers; ++c)
     {
-        int x;
+        consumers.emplace_back([&q, c]() {
+            int x;
+            while (q.pop(x))
+            {
+                std::cout << "  [Consumer " << c << "] Popped: " << x << '\n';
+                std::this_thread::sleep_for(std::chrono::milliseconds(100)); // slower consumer
+            }
+            std::cout << "  [Consumer " << c << "] Exiting (queue empty & shutdown).\n";
+        });
+    }
 
-        while(q.pop(x))
-        {
-            std::cout << "Consumed : " << x << '\n';
-        }
+    // Wait for all producers to finish pushing their items
+    for (auto& t : producers)
+    {
+        t.join();
+    }
 
-        std::cout << "Consumer exiting\n";
-    });
+    std::cout << "\n=== All producers finished. Shutting down queue... ===\n\n";
+    q.shutdown();
 
-    producer.join();
-    consumer.join();
+    // Wait for all consumers to drain the remaining items and exit
+    for (auto& t : consumers)
+    {
+        t.join();
+    }
+
+    std::cout << "\nAll threads joined successfully. Program completed.\n";
+    return 0;
 }
